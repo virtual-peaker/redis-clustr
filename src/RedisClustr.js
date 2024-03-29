@@ -432,6 +432,23 @@ RedisClustr.prototype.commandCallback = function(cli, cmd, args, cb) {
   // https://github.com/antirez/redis-rb-cluster/blob/fd931ed34dfc53159e2f52c9ea2d4a5073faabeb/cluster.rb#L29
   var retries = 16;
 
+  let timeout = null;
+  // dealing with hanging clients
+  if (self.config.request_timeout) {
+    timeout = setTimeout(() => {
+      const err = new Error('client request timeout');
+      err.code = 'UNCERTAIN_STATE';
+      const key = Object.keys(self.connections).find(k => self.connections[k] === cli);
+      self.emit('connectionError', err, cli);
+      self.connections[key] = false;
+      cli.emit('error', err);
+      if (self.subscribeClient && self.subscribeClient.address && self.subscribeClient.address === cli.address) {
+        self.subscribeClient.emit('error', err);
+      }
+      cb(err);
+    }, self.config.request_timeout);
+  }
+
   args.push(function(err, resp) {
     if (err && err.message && retries--) {
       var msg = err.message;
@@ -461,6 +478,7 @@ RedisClustr.prototype.commandCallback = function(cli, cmd, args, cb) {
       }
     }
 
+    clearTimeout(timeout);
     cb(err, resp);
   });
 };
