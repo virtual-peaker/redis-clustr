@@ -422,9 +422,9 @@ RedisClustr.prototype.doMultiKeyCommand = function(cmd, conf, origArgs) {
  * @param  {Redis}    cli  A Redis client
  * @param  {string}   cmd  The Redis command (e.g. get)
  * @param  {array}    args Arguments to be passed to the command (and to have our callback added to)
- * @param  {Function} cb   The main callback to wrap around
+ * @param  {Function} ccb   The main callback to wrap around
  */
-RedisClustr.prototype.commandCallback = function(cli, cmd, args, cb) {
+RedisClustr.prototype.commandCallback = function(cli, cmd, args, ccb) {
   var self = this;
 
   // number of attempts/redirects when we get connection errors
@@ -432,19 +432,43 @@ RedisClustr.prototype.commandCallback = function(cli, cmd, args, cb) {
   // https://github.com/antirez/redis-rb-cluster/blob/fd931ed34dfc53159e2f52c9ea2d4a5073faabeb/cluster.rb#L29
   var retries = 16;
 
+  // The following wraps the callback so that we can check for double calls and return an error. 
+  let called = 0;
+  const cb = (...outputArgs) => {
+    called += 1;
+    // the first time it is called, we return correctly
+    if (called === 1) {
+      return ccb(...outputArgs);
+    }
+    // any other time it is called, we emit an warning.
+    const err = new Error(`Client callback was called more than once (count = ${called}). This may indicate that request_timeout is set too low.`);
+    err.cmd = cmd;
+    err.args = args;
+    err.outputArgs = outputArgs;
+    self.emit('warning', err);
+    return null;
+  }
   let timeout = null;
   // dealing with hanging clients
   if (self.config.request_timeout) {
     timeout = setTimeout(() => {
-      const err = new Error('client request timeout');
-      err.code = 'UNCERTAIN_STATE';
+      // 1. we remove the cli from the connections list.
       const key = Object.keys(self.connections).find(k => self.connections[k] === cli);
-      self.emit('connectionError', err, cli);
       self.connections[key] = false;
+      // 2. we construct an error that contains information about the command
+      const err = new Error('client request timeout');
+      // the following 'code' will indicate that the slots need to be refreshed. 
+      err.code = 'UNCERTAIN_STATE';
+      err.cmd = cmd;
+      err.args = args;
+      // 3. we emit the error, which will cause the slots to be refreshed
       cli.emit('error', err);
+      // 4. we check to see if the timeout was on a connection shared with the subscribeClient
       if (self.subscribeClient && self.subscribeClient.address && self.subscribeClient.address === cli.address) {
+        // 4.1 we emit the error to force the slot refresh
         self.subscribeClient.emit('error', err);
       }
+      // 5. we return the error to our calling function
       cb(err);
     }, self.config.request_timeout);
   }
@@ -478,6 +502,7 @@ RedisClustr.prototype.commandCallback = function(cli, cmd, args, cb) {
       }
     }
 
+    // clear the timeout so that that we don't return a timeout error.
     clearTimeout(timeout);
     cb(err, resp);
   });
