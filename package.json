@@ -1,7 +1,7 @@
 {
-  "name": "redis-clustr",
+  "name": "@virtual-peaker/redis-clustr",
   "version": "1.7.0",
-  "description": "Redis cluster client",
+  "description": "Redis cluster client, forked from 1.7.0",
   "main": "src/RedisClustr.js",
   "keywords": [
     "redis",
