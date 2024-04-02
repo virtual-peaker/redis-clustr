@@ -177,7 +177,7 @@ RedisClustr.prototype.getSlots = function(cb) {
 
   var runCbs = function(err, slots) {
     var cb;
-    while ((cb = self._slotQ.shift())) {
+    while (self._slotQ && (cb = self._slotQ.shift())) {
       cb(err, slots);
     }
     self._slotQ = false;
@@ -195,8 +195,10 @@ RedisClustr.prototype.getSlots = function(cb) {
       err.errors = tryErrors;
       return runCbs(err);
     }
-
-    client.cluster('slots', function(err, slots) {
+    
+    let trySlotsTimeout = null;
+    var trySlots = function(err, slots) {
+      clearTimeout(trySlotsTimeout);
       if (err) {
         // exclude this client from then next attempt
         exclude.push(client.address);
@@ -234,6 +236,10 @@ RedisClustr.prototype.getSlots = function(cb) {
         if (seenClients.indexOf(i) === -1) {
           self.connections[i].quit();
           self.connections[i] = null;
+          // check if the address matches the subscribeClient
+          if (self.subscribeClient && self.subscribeClient.address === i) {
+            self.subscribeAll();
+          }
         }
       }
 
@@ -263,7 +269,16 @@ RedisClustr.prototype.getSlots = function(cb) {
       }
 
       runCbs(null, self.slots);
-    });
+    };
+
+    if (self.config.request_timeout) {
+      setTimeout(() => {
+        trySlots(new Error('client request timeout'));
+      }, self.config.request_timeout);
+    }
+
+    console.log('###########################################');
+    client.cluster('slots', trySlots);
   };
 
   self.waitFor('connect', self.connected, tryClient);
@@ -458,11 +473,11 @@ RedisClustr.prototype.commandCallback = function(cli, cmd, args, ccb) {
       // 2. we construct an error that contains information about the command
       const err = new Error('client request timeout');
       // the following 'code' will indicate that the slots need to be refreshed. 
-      err.code = 'UNCERTAIN_STATE';
+      // err.code = 'UNCERTAIN_STATE';
       err.cmd = cmd;
       err.args = args;
       // 3. we emit the error, which will cause the slots to be refreshed
-      cli.emit('error', err);
+      // cli.emit('error', err);
       // 4. we check to see if the timeout was on a connection shared with the subscribeClient
       if (self.subscribeClient && self.subscribeClient.address && self.subscribeClient.address === cli.address) {
         // 4.1 we emit the error to force the slot refresh
