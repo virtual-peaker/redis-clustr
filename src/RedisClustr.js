@@ -277,7 +277,6 @@ RedisClustr.prototype.getSlots = function(cb) {
       }, self.config.request_timeout);
     }
 
-    console.log('###########################################');
     client.cluster('slots', trySlots);
   };
 
