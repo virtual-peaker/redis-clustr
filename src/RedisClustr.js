@@ -274,10 +274,12 @@ RedisClustr.prototype.getSlots = function(cb) {
     };
 
     // error on the cluster command if it takes too long.
-    if (self.config.request_timeout) {
-      setTimeout(() => {
-        trySlots(new Error('client request timeout'));
-      }, self.config.request_timeout);
+    if (self.config.commandTimeout) {
+      trySlotsTimeout = setTimeout(() => {
+        const err = new Error('cluster command \'slots\' timeout');
+        self.emit('connectionError', err);
+        trySlots(err);
+      }, self.config.commandTimeout);
     }
 
     client.cluster('slots', trySlots);
@@ -458,7 +460,7 @@ RedisClustr.prototype.commandCallback = function(cli, cmd, args, ccb) {
       return ccb(...outputArgs);
     }
     // any other time it is called, we emit an warning.
-    const err = new Error(`Client callback was called more than once (count = ${called}). This may indicate that request_timeout is set too low.`);
+    const err = new Error(`Client callback was called more than once (count = ${called}). This may indicate that commandTimeout is set too low.`);
     err.cmd = cmd;
     err.args = args;
     err.outputArgs = outputArgs;
@@ -468,13 +470,14 @@ RedisClustr.prototype.commandCallback = function(cli, cmd, args, ccb) {
 
   // error on the command if it takes too long.
   let timeout = null;
-  if (self.config.request_timeout) {
+  if (self.config.commandTimeout) {
     timeout = setTimeout(() => {
       const err = new Error('client request timeout');
       err.cmd = cmd;
       err.args = args;
+      self.emit('connectionError', err);
       cb(err);
-    }, self.config.request_timeout);
+    }, self.config.commandTimeout);
   }
 
   args.push(function(err, resp) {
