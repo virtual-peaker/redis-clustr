@@ -177,7 +177,7 @@ RedisClustr.prototype.getSlots = function(cb) {
 
   var runCbs = function(err, slots) {
     var cb;
-    while ((cb = self._slotQ.shift())) {
+    while (self._slotQ && (cb = self._slotQ.shift())) {
       cb(err, slots);
     }
     self._slotQ = false;
@@ -195,8 +195,12 @@ RedisClustr.prototype.getSlots = function(cb) {
       err.errors = tryErrors;
       return runCbs(err);
     }
-
-    client.cluster('slots', function(err, slots) {
+    
+    // this will be used for the timeout timer.
+    let trySlotsTimeout = null;
+    var trySlots = function(err, slots) {
+      // clear the timeout timer (if set).
+      clearTimeout(trySlotsTimeout);
       if (err) {
         // exclude this client from then next attempt
         exclude.push(client.address);
@@ -234,6 +238,10 @@ RedisClustr.prototype.getSlots = function(cb) {
         if (seenClients.indexOf(i) === -1) {
           self.connections[i].quit();
           self.connections[i] = null;
+          // check if the address matches the subscribeClient, and resubscribe
+          if (self.subscribeClient && self.subscribeClient.address === i) {
+            self.subscribeAll();
+          }
         }
       }
 
@@ -263,7 +271,18 @@ RedisClustr.prototype.getSlots = function(cb) {
       }
 
       runCbs(null, self.slots);
-    });
+    };
+
+    // error on the cluster command if it takes too long.
+    if (self.config.commandTimeout) {
+      trySlotsTimeout = setTimeout(() => {
+        const err = new Error('cluster command \'slots\' timeout');
+        self.emit('connectionError', err);
+        trySlots(err);
+      }, self.config.commandTimeout);
+    }
+
+    client.cluster('slots', trySlots);
   };
 
   self.waitFor('connect', self.connected, tryClient);
@@ -422,15 +441,44 @@ RedisClustr.prototype.doMultiKeyCommand = function(cmd, conf, origArgs) {
  * @param  {Redis}    cli  A Redis client
  * @param  {string}   cmd  The Redis command (e.g. get)
  * @param  {array}    args Arguments to be passed to the command (and to have our callback added to)
- * @param  {Function} cb   The main callback to wrap around
+ * @param  {Function} ccb   The main callback to wrap around
  */
-RedisClustr.prototype.commandCallback = function(cli, cmd, args, cb) {
+RedisClustr.prototype.commandCallback = function(cli, cmd, args, ccb) {
   var self = this;
 
   // number of attempts/redirects when we get connection errors
   // or when we get MOVED/ASK responses
   // https://github.com/antirez/redis-rb-cluster/blob/fd931ed34dfc53159e2f52c9ea2d4a5073faabeb/cluster.rb#L29
   var retries = 16;
+
+  // The following wraps the callback so that we can check for double calls and return an error. 
+  let called = 0;
+  const cb = (...outputArgs) => {
+    called += 1;
+    // the first time it is called, we return correctly
+    if (called === 1) {
+      return ccb(...outputArgs);
+    }
+    // any other time it is called, we emit an warning.
+    const err = new Error(`Client callback was called more than once (count = ${called}). This may indicate that commandTimeout is set too low.`);
+    err.cmd = cmd;
+    err.args = args;
+    err.outputArgs = outputArgs;
+    self.emit('warning', err);
+    return null;
+  }
+
+  // error on the command if it takes too long.
+  let timeout = null;
+  if (self.config.commandTimeout) {
+    timeout = setTimeout(() => {
+      const err = new Error('client request timeout');
+      err.cmd = cmd;
+      err.args = args;
+      self.emit('connectionError', err);
+      cb(err);
+    }, self.config.commandTimeout);
+  }
 
   args.push(function(err, resp) {
     if (err && err.message && retries--) {
@@ -461,6 +509,8 @@ RedisClustr.prototype.commandCallback = function(cli, cmd, args, cb) {
       }
     }
 
+    // clear the timeout so that that we don't return a timeout error.
+    clearTimeout(timeout);
     cb(err, resp);
   });
 };
